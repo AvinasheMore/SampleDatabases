@@ -1,0 +1,256 @@
+
+/*
+
+Build tbl_wantlist_product, which gather all details for lists items added to by an in-store customer
+
+*/
+
+
+CREATE OR REPLACE TABLE `internal_prj`.stage.tbl_associate_add
+CLUSTER BY ListID AS
+SELECT 
+	EventDate,
+	RetailStoreID,
+	ECommerceStoreID,
+	AssociateEmployeeID,
+	AssociateCuID,
+	ListID,
+	ListSKUAdded,
+	ListSKUAddedTimestamp,
+	ProductAddedBy,
+	ListCreatedBy
+FROM `internal_prj.int_reporting.tbl_associate_add_full`
+QUALIFY ROW_NUMBER() OVER (PARTITION BY ListID, ListSKUAdded ORDER BY ListSKUAddedTimestamp DESC) = 1;
+
+
+CREATE OR REPLACE TABLE `internal_prj`.stage.tbl_store_add
+CLUSTER BY ListID AS
+SELECT 
+	RetailStoreID,
+	EventDate,
+	SessionStartDate,
+	ECommerceStoreID,
+	SessionStartTime,
+	SessionEndTime,
+	CuID,
+	ListID,
+	ListSKUAdded,
+	ListSKUAddedTimestamp,
+  	ProductAddedBy,
+	ListCreatedBy
+FROM `internal_prj.int_reporting.tbl_store_add_full`
+QUALIFY ROW_NUMBER() OVER (PARTITION BY ListID, ListSKUAdded ORDER BY ListSKUAddedTimestamp DESC) = 1;
+
+CREATE OR REPLACE TABLE `internal_prj`.stage.tmp_active_retail_list_pre
+CLUSTER BY ListID AS
+SELECT a.ListID,
+	a.RetailStoreID,
+	MAX(b.Name) ListName,
+	MAX(b.StoreID) ListSoID,
+	MAX(b.OwnerID) ListCuID,
+	MAX(DATE(b.DateCreated, "US/Eastern")) ListCreatedTimestamp,
+	COUNT(1) SKUsAddedInStore,
+	MAX(CASE WHEN a.EventDate = DATE(b.DateCreated, "US/Eastern") THEN 1 ELSE 0 END) ListCreatedInStore,
+	MAX(CASE WHEN a.EventDate = DATE(b.DateCreated, "US/Eastern") THEN 1 ELSE 0 END) ListCreatedByAssociate,
+	MAX(a.AssociateEmployeeID) AssociateEmployeeID,
+	MIN(a.ListSKUAddedTimestamp) FirstSKUAddedInStoreTimestamp,
+	MAX(a.ListSKUAddedTimestamp) MostRecentSKUAddedInStoreTimestamp,
+	MAX(a.ListCreatedBy) ListCreatedBy
+FROM `internal_prj`.stage.tbl_associate_add a
+INNER JOIN `external_prj_2.ext_reporting_2.tbl_list b    
+	ON a.ListID = b.ListID
+GROUP BY 1,2;
+
+
+INSERT INTO `internal_prj`.stage.tmp_active_retail_list_pre
+SELECT a.ListID,
+	a.RetailStoreID,
+	b.Name ListName,
+	b.StoreID ListSoID,
+	b.OwnerID ListCuID,
+	DATE(b.DateCreated, "US/Eastern") ListCreatedTimestamp,
+	COUNT(1) SKUsAddedInStore,
+	MAX(CASE WHEN DATE(b.DateCreated, "US/Eastern") BETWEEN a.SessionStartTime AND a.SessionEndTime THEN 1 ELSE 0 END) ListCreatedInStore,
+	IF(a.ListCreatedBy = 'Employee', 1, 0) ListCreatedByAssociate,
+	NULL AssociateEmployeeID,
+	MIN(a.ListSKUAddedTimestamp) FirstSKUAddedInStoreTimestamp,
+	MAX(a.ListSKUAddedTimestamp) MostRecentSKUAddedInStoreTimestamp,
+	MAX(a.ListCreatedBy) ListCreatedBy
+FROM `internal_prj`.stage.tbl_store_add a
+INNER JOIN `external_prj_2.ext_reporting_2.tbl_list b
+	ON a.ListID = b.ListID
+GROUP BY 1,2,3,4,5,6,9;
+
+
+CREATE OR REPLACE TABLE `internal_prj`.stage.tmp_active_retail_list
+CLUSTER BY ListID AS
+SELECT ListID,
+	RetailStoreID,
+	MAX(ListSoID) ECommerceStoreID,
+	MAX(ListName) ListName,
+	MAX(ListCuID) CuID,
+	MIN(ListCreatedTimestamp) CreatedTimestamp,
+	SUM(SKUsAddedInStore) SKUsAddedInStore,
+	MAX(ListCreatedInStore) CreatedInStore,
+	MAX(ListCreatedByAssociate) CreatedByAssociate,
+	MAX(AssociateEmployeeID) AssociateEmployeeID,
+	MIN(FirstSKUAddedInStoreTimestamp) FirstSKUAddedInStoreTimestamp,
+	MAX(MostRecentSKUAddedInStoreTimestamp) MostRecentSKUAddedInStoreTimestamp,
+	ListCreatedBy
+FROM `internal_prj`.stage.tmp_active_retail_list_pre
+GROUP BY 1,2,13;
+
+CREATE OR REPLACE TABLE `internal_prj`.stage.tmp_active_retail_list_product
+CLUSTER BY ListID, PrSKU AS
+SELECT a.ListID,
+	a.RetailStoreID,
+	b.ItemID ListItemID,
+	MAX(a.ECommerceStoreID) ECommerceStoreID,
+	MAX(a.CuID) CuID,
+	MAX(UPPER(c.PrSKU)) PrSKU,
+	MIN(DATETIME(c.DateCreated,'US/Eastern')) AddedTimestamp,
+	CASE WHEN MIN(c.DateDeleted) IS NULL THEN 1 ELSE 0 END IsActive,
+	MIN(DATETIME(c.DateDeleted,'US/Eastern')) DeletedTimestamp,
+	CASE
+		WHEN MAX(e.ListSKUAdded) IS NOT NULL THEN 1
+		WHEN MAX(f.ListSKUAdded) IS NOT NULL THEN 1
+		ELSE 0
+	END AddedInStore,
+	CASE
+		WHEN MAX(e.ListSKUAdded) IS NOT NULL THEN 1
+		ELSE 0
+	END AddedByAssociate,
+	CASE
+		WHEN MAX(e.ListSKUAdded) IS NOT NULL THEN 1
+		WHEN MIN(DATETIME(c.DateCreated,'US/Eastern')) >= MIN(a.FirstSKUAddedInStoreTimestamp) THEN 1
+		ELSE 0
+	END AddedAfterFirstInStoreAction,
+	g.ClId ClassID,
+	COALESCE(e.ProductAddedBy, f.ProductAddedBy, 'Customer') ProductAddedBy,
+	a.ListCreatedBy,
+	MAX(a.MostRecentSKUAddedInStoreTimestamp) MostRecentSKUAddedInStoreTimestamp
+FROM `internal_prj`.stage.tmp_active_retail_list a
+INNER JOIN `external_prj_2.ext_reporting_2.tbl_list_item b
+	ON a.ListID = b.ListID
+INNER JOIN `external_prj_2.ext_reporting_2.tbl_list_product c
+	ON b.ItemID = c.ItemID
+INNER JOIN `external_prj_3.ext_reporting_3.tbl_join_product_class g
+	ON c.PrSKU = g.PrSKU
+		AND g.PcMasterClass = TRUE
+LEFT OUTER JOIN `internal_prj`.stage.tbl_associate_add e
+	ON a.ListID = e.ListID
+		AND UPPER(c.PrSKU) = e.ListSKUAdded
+LEFT OUTER JOIN `internal_prj`.stage.tbl_store_add f
+	ON a.ListID = f.ListID
+		AND UPPER(c.PrSKU) = f.ListSKUAdded
+GROUP BY 1,2,3,13,14,15;
+
+
+CREATE OR REPLACE TABLE `internal_prj`.stage.tmp_purchased_list_product
+CLUSTER BY ListID, PrSKU AS
+WITH tmpRowNum AS ( 	SELECT c.ListID,
+				b.OpPrSKU PrSKU,
+				a.OrID,
+				b.OpID,
+				a.OrCompleteDate,
+				b.ClId ClassID,
+				a.OrCuID CuID,
+				ROW_NUMBER() OVER (PARTITION BY c.ListID, b.OpPrSKU ORDER BY a.OrCompleteDate) RowNum
+			FROM `external_prj_4.ext_reporting_4.tbl_order` a
+			INNER JOIN `external_prj_4.ext_reporting_4.tbl_order_product` b
+				ON a.OrID = b.OpOrID
+			INNER JOIN `internal_prj`.stage.tmp_active_retail_list_product c
+					ON a.OrCuID = c.CuID
+			WHERE a.OrCompleteDate >= '2021-10-01'
+				AND b.ClId = c.ClassID
+				AND a.OrCompleteDate >= c.AddedTimestamp
+				AND NOT a.OrCompleteDate >= COALESCE(c.DeletedTimestamp, '3000-01-01 00:00:00')
+)
+SELECT ListID,
+	PrSKU,
+	OrID PurchasedOrID,
+	OpID PurchasedOpID,
+	OrCompleteDate PurchasedTimestamp,
+	ClassID,
+	CuID,
+FROM tmpRowNum
+WHERE RowNum = 1;
+
+-- build reporting table of wish lists
+CREATE OR REPLACE TABLE `internal_prj`.int_reporting.tbl_wantlist_product
+(
+	ListID int64				OPTIONS(description="Identifier for list"),
+	RetailStoreID int64			OPTIONS(description="ID of retail store location tied to current list"),
+	ECommerceStoreID int64			OPTIONS(description="ID of e-commerce store tied to current list"),
+	CuID int64				OPTIONS(description="Customer account of list owner"),
+	ListItemID int64			OPTIONS(description="ID of current list item"),
+	PrSKU string				OPTIONS(description="Product that was added to list"),
+	AddedDate date				OPTIONS(description="Date when product was added to list"),
+	AddedTimestamp datetime			OPTIONS(description="Time when product was added to list"),
+	IsActive int64				OPTIONS(description="Flag indicating whether product is still active on list"),
+	DeletedTimestamp datetime		OPTIONS(description="Time when product was deleted from list"),
+	AddedInStore int64			OPTIONS(description="Flag indicating whether item was added to list while owner was at a retail location"),
+	AddedByAssociate int64			OPTIONS(description="Flag indicating whether item was added to list by a retail associate collaborator"),
+	AddedAfterFirstInStoreAction int64	OPTIONS(description="Flag indicating whether item was added to list after the first retail interaction for list"),
+	PurchasedAfterAdd int64			OPTIONS(description="Flag indicating whether item was purchased by list owner after being added to list"),
+	PurchasedOrID int64			OPTIONS(description="If item was purchased, gives the OrID of converting order"),
+	PurchasedOpID int64			OPTIONS(description="If item was purchased, gives the OpID of converting order product"),
+	PurchasedTimestamp datetime		OPTIONS(description="If item was purchased, gives the timestamp when converting order was placed"),
+	ClassID int64				OPTIONS(description="ClassId of the product added to the list"),
+	ListAttribution string 			OPTIONS(description="Customer purchased the exact product [direct] (or same class product[indirect]) added to the list"),
+	ListItemAddedBy string			OPTIONS(description="Product added by either Customer or Employee"),
+	ListCreatedBy string		OPTIONS(description="List created by either Customer or Employee")
+)
+PARTITION BY AddedDate
+CLUSTER BY RetailStoreID, ListID, PrSKU AS
+SELECT
+	a.ListID,
+	a.RetailStoreID,
+	a.ECommerceStoreID,
+	a.CuID,
+	a.ListItemID,
+	a.PrSKU,
+	CAST(a.AddedTimestamp AS date) AddedDate,
+	a.AddedTimestamp,
+	a.IsActive,
+	a.DeletedTimestamp,
+	a.AddedInStore,
+	a.AddedByAssociate,
+	a.AddedAfterFirstInStoreAction,
+	CASE WHEN b.PurchasedTimestamp IS NOT NULL THEN 1 ELSE 0 END PurchasedAfterAdd,
+	b.PurchasedOrID,
+	b.PurchasedOpID,
+	b.PurchasedTimestamp,
+	a.ClassID,
+	'direct' ListAttribution,							-- Direct means same Item added and purchased
+	a.ProductAddedBy ListItemAddedBy,
+	a.ListCreatedBy
+FROM `internal_prj`.stage.tmp_active_retail_list_product a
+LEFT OUTER JOIN `internal_prj`.stage.tmp_purchased_list_product b
+	ON a.ListID = b.ListID
+		AND a.ClassID = b.ClassID
+		AND a.PrSKU = b.PrSKU
+WHERE DATE_DIFF(COALESCE(b.PurchasedTimestamp, '{{ var("end_date") }}'), a.MostRecentSKUAddedInStoreTimestamp, DAY) <= 90;
+
+
+CALL `prj1`.functions.sp_pk_check('internal_prj.int_reporting.tbl_wantlist_product', ['RetailStoreID', 'ListID', 'ListItemID', 'ListAttribution']);
+
+
+
+select 'Catalog Standard Tag Succeeded';
+
+/*+JSONHint
+{
+"hint_type": "catalog_enrichment",
+"catalog_assets": [
+{ "dataset": "internal_prj.int_reporting.tbl_wantlist_product", 
+  "scope": "curated",
+  "architecture_domain": "Physical Retail", 
+  "asset_description": "Data Engg Physical Retail owned source of truth that gathers all details for lists created or added to by an in-store customer, either on their own device or via an associate collaborator. PK is 'RetailStoreID', 'ListID'", 
+  "contract": "4am daily SLA" }
+]
+}
+*/
+
+select 'Catalog Standard Tag Succeeded';
+		
