@@ -1,0 +1,91 @@
+
+/*
+Build tbl_online_add_wantlist, which gathers all add to list actions occurring during in-store  visits
+Runs incrementally between start_date and end_date.
+
+CREATE OR REPLACE TABLE `internal_prj`.rpt.tbl_online_add_wantlist
+(
+	StoreId int64			OPTIONS(description="Identifier for retail location where customer started online visit"),
+	StartDate date			OPTIONS(description="Date when the online visit started"),
+	key string			OPTIONS(description="Identifier for online visit in clickstream table"),
+	StartTime datetime		OPTIONS(description="Time when online visit started"),
+	EndTime datetime			OPTIONS(description="Time when online visit ended"),
+	Customer int64				OPTIONS(description="Customer account tied to online visit"),
+	wantlistID int64				OPTIONS(description="Identifier for list"),
+	ProductAdded string			OPTIONS(description="Identifier for product that was added to list"),
+	ProductAddedTimestamp datetime		OPTIONS(description="Time when product was added to list"),
+	ProductAddedBy string		OPTIONS(description="Product added by either Customer or Employee"),
+	wantlistCreatedBy string		OPTIONS(description="List created by either Customer or Employee")
+)
+PARTITION BY StartDate
+CLUSTER BY wantlistID;
+
+*/
+
+-- check all in-store visits for given dates for add to list actions, recording the list ID, SKU, and timestamp for all actions found
+CREATE OR REPLACE TABLE `internal_prj`.staging_list.swap_tbl_online_add_wantlist
+(
+	StoreId int64			OPTIONS(description="Identifier for retail location where customer started online visit"),
+	StartDate date			OPTIONS(description="Date when the online visit started"),
+	key string			OPTIONS(description="Identifier for online visit in clickstream table"),
+	StartTime datetime		OPTIONS(description="Time when online visit started"),
+	EndTime datetime			OPTIONS(description="Time when online visit ended"),
+	Customer int64				OPTIONS(description="Customer account tied to online visit"),
+	wantlistID int64				OPTIONS(description="Identifier for list"),
+	ProductAdded string			OPTIONS(description="Identifier for product that was added to list"),
+	ProductAddedTimestamp datetime		OPTIONS(description="Time when product was added to list"),
+	ProductAddedBy string		OPTIONS(description="Product added by either Customer or Employee"),
+	wantlistCreatedBy string		OPTIONS(description="List created by either Customer or Employee")
+)
+PARTITION BY StartDate
+CLUSTER BY wantlistID 
+AS (
+SELECT 
+	b.StoreId,
+	b.StartDate,
+	a.key,
+	b.StartTime,
+	b.EndTime,
+	b.Customer,
+	e.wantlistID wantlistID,
+	a.AddToIdeaBoardsSKU ProductAdded,
+	CAST(a.Event_Timestamp AS datetime) ProductAddedTimestamp,
+	'Customer' ProductAddedBy, --Since we are tracking for Customer events, products are assummed to be added by Customers,
+	IF(e.EmployeeID IS NULL, 'Customer', 'Employee') wantlistCreatedBy
+FROM `external_prj_1`.ext_rpt_1.tbl_clicks_source a
+INNER JOIN `internal_prj`.int_rpt.tbl_wantlist_created_by e
+	ON CAST(REGEXP_EXTRACT(a.Event_CstmVars, 'FavoritewantlistID=([0-9]+);') AS INT64) = e.wantlistID
+INNER JOIN `internal_prj`.int_rpt.tbl_online_visit b
+	ON b.StartDate BETWEEN '{{ var("start_date") }}' AND '{{ var("end_date") }}'
+		AND a.StartDate = b.StartDate 
+		AND a.Event_SoID = b.ECommerceStoreID
+		AND a.key = b.key
+WHERE a.StartDate BETWEEN '{{ var("start_date") }}' AND '{{ var("end_date") }}'
+	AND a.AddToIdeaBoardsSKU IS NOT NULL
+);
+
+-- use partition swap to move data into final table 
+/*+JSONHint 
+{
+	"hint_type": "swap_partitions", 
+	"source": "`internal_prj`.staging_list.swap_tbl_online_add_wantlist", 
+	"target": "`internal_prj`.rpt.tbl_online_add_wantlist", 
+	"partition_col": "StartDate"
+}
+*/
+
+SELECT 'Partition Swap hint';
+		
+/*+JSONHint
+{
+"hint_type": "catalog_enrichment",
+"catalog_assets": [
+{ "dataset": "internal_prj.rpt.tbl_online_add_wantlist", 
+  "scope": "rpt",
+  "architecture_domain": "Test domain", 
+  "asset_description": "test", 
+  "contract": "4am daily SLA" }
+]
+}
+*/
+Select 'Catalog Standard Tag Succeeded';
