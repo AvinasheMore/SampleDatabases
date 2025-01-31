@@ -76,7 +76,7 @@ CREATE TABLE LogTable (
     LogTime DATETIME NOT NULL DEFAULT GETDATE()
 );
 
-
+GO
 
 -- Stored Procedure 1: Get Customer Order Summary (using VARCHAR(MAX) and VARBINARY(MAX))
 CREATE PROCEDURE GetCustomerOrderSummary
@@ -104,7 +104,7 @@ AS
 BEGIN
     SELECT
         p.ProductName,
-        s.StoreName,
+        s2.StoreName,
         SUM(s.Quantity * p.UnitPrice) AS TotalSales
     FROM
         Sales s
@@ -114,7 +114,7 @@ BEGIN
         Stores s2 ON s.StoreID = s2.StoreID
     WHERE s.OrderDate >= CAST('2023-01-01' AS DATETIME) AND s.OrderDate < CAST('2024-01-01' AS DATETIME) 
     GROUP BY
-        p.ProductName, s.StoreName
+        p.ProductName, s2.StoreName
     ORDER BY
         TotalSales DESC;
 END;
@@ -130,7 +130,7 @@ BEGIN
     FROM
         Employee
     WHERE
-        CONTAINS(Resume, @Keyword); 
+        Resume LIKE '%' + @Keyword + '%'; 
 END;
 GO
 
