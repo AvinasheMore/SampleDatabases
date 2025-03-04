@@ -245,9 +245,9 @@ select 'Catalog Standard Tag Succeeded';
 "catalog_assets": [
 { "dataset": "internal_prj.int_reporting.tbl_wantlist_product", 
   "scope": "curated",
-  "architecture_domain": "Physical Retail", 
-  "asset_description": "Data Engg Physical Retail owned source of truth that gathers all details for lists created or added to by an in-store customer, either on their own device or via an associate collaborator. PK is 'RetailStoreID', 'ListID'", 
-  "contract": "4am daily SLA" }
+  "architecture_domain": "Test Domain", 
+  "asset_description": "Test", 
+  "contract": "Table" }
 ]
 }
 */
